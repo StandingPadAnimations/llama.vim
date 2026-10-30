@@ -2722,16 +2722,44 @@ function! s:nep_render(bufnr, filepath, l0, l1, predicted) abort
         return
     endif
 
+    " Compute common prefix and suffix to isolate the EXACT lines that changed
+    let l:len_orig = len(l:orig_lines)
+    let l:len_upd  = len(l:updated_lines)
+    let l:min_len  = min([l:len_orig, l:len_upd])
+
+    let l:pre = 0
+    while l:pre < l:min_len && l:orig_lines[l:pre] ==# l:updated_lines[l:pre]
+        let l:pre += 1
+    endwhile
+
+    let l:suf = 0
+    let l:max_suf = l:min_len - l:pre
+    while l:suf < l:max_suf && l:orig_lines[l:len_orig - 1 - l:suf] ==# l:updated_lines[l:len_upd - 1 - l:suf]
+        let l:suf += 1
+    endwhile
+
+    if l:pre == l:len_orig && l:len_orig == l:len_upd
+        call llama#debug_log('nep_render', 'Predicted text matches current text; no edit suggested')
+        return
+    endif
+
+    " l:change_l0 .. l:change_l1 are the buffer lines that are being replaced
+    let l:change_l0 = a:l0 + l:pre
+    let l:change_l1 = a:l0 + l:len_orig - 1 - l:suf
+
+    let l:slice_orig = l:change_l0 <= l:change_l1 ? l:orig_lines[l:pre : l:len_orig - 1 - l:suf] : []
+    let l:slice_upd  = l:updated_lines[l:pre : l:len_upd - 1 - l:suf]
+
     " Hide FIM hint if shown
     call llama#fim_hide()
 
     let s:nep_data = {
         \ 'bufnr': a:bufnr,
         \ 'filepath': a:filepath,
-        \ 'l0': a:l0,
-        \ 'l1': a:l1,
-        \ 'original_lines': l:orig_lines,
-        \ 'updated_lines': l:updated_lines,
+        \ 'l0': l:change_l0,
+        \ 'l1': l:change_l1,
+        \ 'original_lines': l:slice_orig,
+        \ 'updated_lines': l:slice_upd,
         \ 'format': g:llama_config.nep_format,
         \ 'extmark_src': -1,
         \ 'extmark_virt': -1,
@@ -2739,32 +2767,45 @@ function! s:nep_render(bufnr, filepath, l0, l1, predicted) abort
 
     if s:ghost_text_nvim
         let l:ns = nvim_create_namespace('vt_nep')
-        let s:nep_data.extmark_src = nvim_buf_set_extmark(a:bufnr, l:ns, a:l0 - 1, 0, {
-            \ 'end_row': a:l1 - 1,
-            \ 'end_col': len(getline(a:l1)),
-            \ 'hl_group': 'llama_hl_nep_src',
-            \ })
 
-        let l:banner = '--- Next Edit (' . g:llama_config.nep_format . '): Tab to accept, Esc to cancel ---'
+        " Highlight only the lines that are being replaced
+        if l:change_l0 <= l:change_l1
+            let s:nep_data.extmark_src = nvim_buf_set_extmark(a:bufnr, l:ns, l:change_l0 - 1, 0, {
+                \ 'end_row': l:change_l1 - 1,
+                \ 'end_col': len(getline(l:change_l1)),
+                \ 'hl_group': 'llama_hl_nep_src',
+                \ })
+        endif
+
+        let l:banner = '--- Next Edit (' . g:llama_config.nep_format . ') ---'
         let l:virt_lines = [[[l:banner, 'llama_hl_nep_info']]]
-        for l:line in l:updated_lines
-            call add(l:virt_lines, [[l:line, 'llama_hl_nep_preview']])
-        endfor
+        if empty(l:slice_upd)
+            call add(l:virt_lines, [['- (lines deleted)', 'llama_hl_nep_preview']])
+        else
+            for l:line in l:slice_upd
+                call add(l:virt_lines, [['+ ' . l:line, 'llama_hl_nep_preview']])
+            endfor
+        endif
         call add(l:virt_lines, [[repeat('-', len(l:banner)), 'llama_hl_nep_info']])
 
-        let s:nep_data.extmark_virt = nvim_buf_set_extmark(a:bufnr, l:ns, a:l1 - 1, 0, {
+        " Attach preview at the bottom of the replaced range or insertion line
+        let l:attach_line = l:change_l0 <= l:change_l1 ? l:change_l1 - 1 : max([0, l:change_l1 - 1])
+        let s:nep_data.extmark_virt = nvim_buf_set_extmark(a:bufnr, l:ns, l:attach_line, 0, {
             \ 'virt_lines': l:virt_lines,
             \ })
     elseif s:ghost_text_vim
-        let l:prop_id = prop_add(a:l0, 1, {
-            \ 'type': 'llama_hl_nep_src',
-            \ 'end_lnum': a:l1,
-            \ 'end_col': len(getline(a:l1)) + 1,
-            \ })
-        let s:nep_data.extmark_src = l:prop_id
+        if l:change_l0 <= l:change_l1
+            let l:prop_id = prop_add(l:change_l0, 1, {
+                \ 'type': 'llama_hl_nep_src',
+                \ 'end_lnum': l:change_l1,
+                \ 'end_col': len(getline(l:change_l1)) + 1,
+                \ })
+            let s:nep_data.extmark_src = l:prop_id
+        endif
 
-        let l:info_text = ' Next Edit (' . g:llama_config.nep_format . '): <Tab> accept, <Esc> cancel'
-        call prop_add(a:l1, 0, {
+        let l:info_text = ' Next Edit (' . g:llama_config.nep_format . ')'
+        let l:attach_line = l:change_l0 <= l:change_l1 ? l:change_l1 : max([1, l:change_l1])
+        call prop_add(l:attach_line, 0, {
             \ 'type': 'llama_hl_nep_info',
             \ 'text': l:info_text,
             \ 'text_align': 'below',
@@ -2774,20 +2815,21 @@ function! s:nep_render(bufnr, filepath, l0, l1, predicted) abort
     if g:llama_config.keymap_nep_accept != ''
         exe 'nnoremap <buffer> <silent> ' . g:llama_config.keymap_nep_accept . ' :call llama#nep_accept()<CR>'
         exe 'inoremap <buffer> <silent> ' . g:llama_config.keymap_nep_accept . ' <C-\><C-O>:call llama#nep_accept()<CR>'
+        exe 'vnoremap <buffer> <silent> ' . g:llama_config.keymap_nep_accept . ' :<C-u>call llama#nep_accept()<CR>'
     endif
     if g:llama_config.keymap_nep_cancel != ''
         exe 'nnoremap <buffer> <silent> ' . g:llama_config.keymap_nep_cancel . ' :call llama#nep_cancel()<CR>'
         exe 'inoremap <buffer> <silent> ' . g:llama_config.keymap_nep_cancel . ' <C-\><C-O>:call llama#nep_cancel()<CR>'
+        exe 'vnoremap <buffer> <silent> ' . g:llama_config.keymap_nep_cancel . ' :<C-u>call llama#nep_cancel()<CR>'
     endif
 
     let s:nep_shown = v:true
-    call llama#debug_log('nep_render', printf('Displayed NEP suggestion for lines %d-%d', a:l0, a:l1))
+    call llama#debug_log('nep_render', printf('Displayed NEP suggestion for lines %d-%d', l:change_l0, l:change_l1))
 endfunction
 
 function! llama#nep_accept() abort
     if !s:nep_shown || empty(s:nep_data)
-        call feedkeys("\<Tab>", 'n')
-        return
+        return v:false
     endif
 
     let l:bufnr = s:nep_data.bufnr
@@ -2817,18 +2859,26 @@ function! llama#nep_accept() abort
     call cursor(l:l0, 1)
 
     echo 'llama.vim: Applied Next Edit (' . l:format . ')'
+    return v:true
 endfunction
 
 function! s:nep_replace_range(bufnr, l0, l1, new_lines) abort
-    let l:total = len(getbufline(a:bufnr, 1, '$'))
-    if a:l0 == 1 && a:l1 >= l:total
-        call deletebufline(a:bufnr, 1, '$')
-        call setbufline(a:bufnr, 1, a:new_lines)
-        return
-    endif
+    if a:l0 <= a:l1
+        let l:total = len(getbufline(a:bufnr, 1, '$'))
+        if a:l0 == 1 && a:l1 >= l:total
+            call deletebufline(a:bufnr, 1, '$')
+            call setbufline(a:bufnr, 1, a:new_lines)
+            return
+        endif
 
-    call deletebufline(a:bufnr, a:l0, a:l1)
-    call appendbufline(a:bufnr, a:l0 - 1, a:new_lines)
+        call deletebufline(a:bufnr, a:l0, a:l1)
+        if !empty(a:new_lines)
+            call appendbufline(a:bufnr, a:l0 - 1, a:new_lines)
+        endif
+    else
+        " Pure insertion after line a:l1
+        call appendbufline(a:bufnr, a:l1, a:new_lines)
+    endif
 endfunction
 
 function! llama#nep_cancel() abort
@@ -2859,10 +2909,12 @@ function! llama#nep_hide() abort
     if g:llama_config.keymap_nep_accept != ''
         exe 'silent! nunmap <buffer> ' . g:llama_config.keymap_nep_accept
         exe 'silent! iunmap <buffer> ' . g:llama_config.keymap_nep_accept
+        exe 'silent! vunmap <buffer> ' . g:llama_config.keymap_nep_accept
     endif
     if g:llama_config.keymap_nep_cancel != ''
         exe 'silent! nunmap <buffer> ' . g:llama_config.keymap_nep_cancel
         exe 'silent! iunmap <buffer> ' . g:llama_config.keymap_nep_cancel
+        exe 'silent! vunmap <buffer> ' . g:llama_config.keymap_nep_cancel
     endif
 endfunction
 
