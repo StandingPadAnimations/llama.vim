@@ -1645,6 +1645,10 @@ endfunction
 " if accept_type == 'line', accept only the first line of the response
 " if accept_type == 'word', accept only the first word of the response
 function! llama#fim_accept(accept_type)
+    if !s:fim_hint_shown || empty(s:fim_data) || !has_key(s:fim_data, 'pos_x')
+        return ''
+    endif
+
     let l:pos_x  = s:fim_data['pos_x']
     let l:pos_y  = s:fim_data['pos_y']
 
