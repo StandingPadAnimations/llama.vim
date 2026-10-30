@@ -102,7 +102,7 @@ let s:default_config = {
     \ 'n_prefix':               256,
     \ 'n_suffix':               64,
     \ 'n_predict':              128,
-    \ 'n_predict_nep':          512,
+    \ 'n_predict_nep':          256,
     \ 'stop_strings_fim':       [],
     \ 'stop_strings_inst':      [],
     \ 'stop_strings_nep':       ['<|file_sep|>', '</s>', '>>>>>>> UPDATED', '<<<<<<< CURRENT'],
@@ -2512,7 +2512,7 @@ function! s:nep_dispatch(l0, l1, pos_x, pos_y, is_auto) abort
 
     let l:request = {
         \ 'prompt': l:prompt,
-        \ 'n_predict': get(g:llama_config, 'n_predict_nep', 512),
+        \ 'n_predict': get(g:llama_config, 'n_predict_nep', 256),
         \ 'temperature': 0.0,
         \ 'stop': g:llama_config.stop_strings_nep,
         \ 'stream': v:false,
@@ -2527,7 +2527,6 @@ function! s:nep_dispatch(l0, l1, pos_x, pos_y, is_auto) abort
         \ "curl",
         \ "--silent",
         \ "--no-buffer",
-        \ "--max-time", "30",
         \ "--request", "POST",
         \ "--url", g:llama_config.endpoint_nep,
         \ "--header", "Content-Type: application/json",
