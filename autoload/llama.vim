@@ -2456,6 +2456,7 @@ function! llama#nep_command(l0, l1) abort
 endfunction
 
 function! llama#nep_range(l0, l1) abort
+    call s:nep_record_change(bufnr('%'))
     let l:pos_x = col('.') - 1
     let l:pos_y = line('.')
     call s:nep_dispatch(a:l0, a:l1, l:pos_x, l:pos_y, v:false)
@@ -2466,10 +2467,13 @@ function! llama#nep(pos_x, pos_y, is_auto = v:false) abort
         return
     endif
 
+    let l:bufnr = bufnr('%')
     let l:filepath = expand('%')
     if empty(l:filepath)
         return
     endif
+
+    call s:nep_record_change(l:bufnr)
 
     let l:pos_x = a:pos_x < 0 ? col('.') - 1 : a:pos_x
     let l:pos_y = a:pos_y < 0 ? line('.') : a:pos_y
@@ -2493,6 +2497,10 @@ function! s:nep_dispatch(l0, l1, pos_x, pos_y, is_auto) abort
             call job_stop(s:current_job_nep)
         endif
         let s:current_job_nep = v:null
+    endif
+
+    if !a:is_auto
+        echo 'llama.vim NEP: Predicting next edit...'
     endif
 
     let l:fmt = g:llama_config.nep_format
@@ -2536,7 +2544,7 @@ function! s:nep_dispatch(l0, l1, pos_x, pos_y, is_auto) abort
 
     if s:ghost_text_nvim
         let s:current_job_nep = jobstart(l:curl_command, {
-            \ 'on_stdout': function('s:nep_on_response', [l:filepath, a:l0, a:l1, a:pos_x, a:pos_y, l:bufnr]),
+            \ 'on_stdout': function('s:nep_on_response', [l:filepath, a:l0, a:l1, a:pos_x, a:pos_y, l:bufnr, a:is_auto]),
             \ 'on_exit':   function('s:nep_on_exit'),
             \ 'stdout_buffered': v:true,
             \ })
@@ -2544,7 +2552,7 @@ function! s:nep_dispatch(l0, l1, pos_x, pos_y, is_auto) abort
         call chanclose(s:current_job_nep, 'stdin')
     elseif s:ghost_text_vim
         let s:current_job_nep = job_start(l:curl_command, {
-            \ 'out_cb':  function('s:nep_on_response', [l:filepath, a:l0, a:l1, a:pos_x, a:pos_y, l:bufnr]),
+            \ 'out_cb':  function('s:nep_on_response', [l:filepath, a:l0, a:l1, a:pos_x, a:pos_y, l:bufnr, a:is_auto]),
             \ 'exit_cb': function('s:nep_on_exit'),
             \ })
         let l:channel = job_getchannel(s:current_job_nep)
@@ -2667,7 +2675,7 @@ function! s:nep_build_zeta_prompt(file_path, l0, l1, pos_x, pos_y) abort
     return l:prompt
 endfunction
 
-function! s:nep_on_response(filepath, l0, l1, pos_x, pos_y, bufnr, job_id, data, event = v:null) abort
+function! s:nep_on_response(filepath, l0, l1, pos_x, pos_y, bufnr, is_auto, job_id, data, event = v:null) abort
     if s:ghost_text_nvim
         let l:raw = join(a:data, "\n")
     elseif s:ghost_text_vim
@@ -2682,6 +2690,11 @@ function! s:nep_on_response(filepath, l0, l1, pos_x, pos_y, bufnr, job_id, data,
         let l:decoded = json_decode(l:raw)
     catch
         call llama#debug_log('nep_on_response json decode error', l:raw)
+        if !a:is_auto
+            echohl WarningMsg
+            echom 'llama.vim NEP: Failed to parse server response'
+            echohl None
+        endif
         return
     endtry
 
@@ -2711,6 +2724,10 @@ function! s:nep_on_response(filepath, l0, l1, pos_x, pos_y, bufnr, job_id, data,
     endif
 
     if empty(l:content)
+        call llama#debug_log('nep_on_response', 'Empty content returned from server')
+        if !a:is_auto
+            echo 'llama.vim NEP: Empty completion from model'
+        endif
         return
     endif
 
@@ -2724,18 +2741,21 @@ function! s:nep_on_response(filepath, l0, l1, pos_x, pos_y, bufnr, job_id, data,
     endif
 
     if bufnr('%') == a:bufnr
-        call s:nep_render(a:bufnr, a:filepath, a:l0, a:l1, l:content)
+        call s:nep_render(a:bufnr, a:filepath, a:l0, a:l1, l:content, a:is_auto)
     endif
 endfunction
 
 function! s:nep_on_exit(job_id, exit_code, event = v:null) abort
     if a:exit_code != 0
         call llama#debug_log('nep_on_exit: job failed with exit code ' . a:exit_code)
+        echohl WarningMsg
+        echom 'llama.vim NEP: curl failed with exit code ' . a:exit_code
+        echohl None
     endif
     let s:current_job_nep = v:null
 endfunction
 
-function! s:nep_render(bufnr, filepath, l0, l1, predicted) abort
+function! s:nep_render(bufnr, filepath, l0, l1, predicted, is_auto = v:false) abort
     call llama#nep_hide()
 
     let l:orig_lines = getbufline(a:bufnr, a:l0, a:l1)
@@ -2753,6 +2773,9 @@ function! s:nep_render(bufnr, filepath, l0, l1, predicted) abort
     let l:upd_text = join(l:updated_lines, "\n")
     if l:orig_text ==# l:upd_text || empty(trim(l:upd_text))
         call llama#debug_log('nep_render', 'Predicted text matches current text; no edit suggested')
+        if !a:is_auto
+            echo 'llama.vim NEP: No edit suggested (model kept current code)'
+        endif
         return
     endif
 
@@ -2774,6 +2797,9 @@ function! s:nep_render(bufnr, filepath, l0, l1, predicted) abort
 
     if l:pre == l:len_orig && l:len_orig == l:len_upd
         call llama#debug_log('nep_render', 'Predicted text matches current text; no edit suggested')
+        if !a:is_auto
+            echo 'llama.vim NEP: No edit suggested'
+        endif
         return
     endif
 
@@ -2826,6 +2852,7 @@ function! s:nep_render(bufnr, filepath, l0, l1, predicted) abort
 
         " Attach preview at the bottom of the replaced range or insertion line
         let l:attach_line = l:change_l0 <= l:change_l1 ? l:change_l1 - 1 : max([0, l:change_l1 - 1])
+        let l:attach_line = min([max([0, l:attach_line]), max([0, line('$') - 1])])
         let s:nep_data.extmark_virt = nvim_buf_set_extmark(a:bufnr, l:ns, l:attach_line, 0, {
             \ 'virt_lines': l:virt_lines,
             \ })
@@ -2861,6 +2888,7 @@ function! s:nep_render(bufnr, filepath, l0, l1, predicted) abort
 
     let s:nep_shown = v:true
     call llama#debug_log('nep_render', printf('Displayed NEP suggestion for lines %d-%d', l:change_l0, l:change_l1))
+    echo 'llama.vim NEP: Suggestion ready (lines ' . l:change_l0 . '-' . l:change_l1 . '). <C-w> to accept'
 endfunction
 
 function! llama#nep_accept() abort
