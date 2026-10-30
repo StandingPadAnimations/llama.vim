@@ -623,7 +623,6 @@ function! llama#setup_autocmds()
     augroup llama
         autocmd!
         autocmd InsertLeavePre  * call llama#fim_hide()
-        autocmd InsertLeavePre  * call llama#nep_hide()
 
         autocmd CompleteChanged * call llama#fim_hide()
         autocmd CompleteDone    * call s:on_move()
@@ -1733,7 +1732,7 @@ endfunction
 
 " ref: https://github.com/ggml-org/llama.vim/pull/85
 function! llama#is_fim_hint_shown()
-    return s:fim_hint_shown
+    return s:fim_hint_shown ? 1 : 0
 endfunction
 
 " cycle to the next/previous completion
@@ -2431,8 +2430,14 @@ function! s:nep_on_move() abort
     if !s:nep_shown || empty(s:nep_data)
         return
     endif
+    if bufnr('%') != s:nep_data.bufnr
+        call llama#nep_hide()
+        return
+    endif
     let l:cur = line('.')
-    if l:cur < s:nep_data.l0 || l:cur > s:nep_data.l1
+    let l:w0 = get(s:nep_data, 'window_l0', s:nep_data.l0)
+    let l:w1 = get(s:nep_data, 'window_l1', s:nep_data.l1)
+    if l:cur < max([1, l:w0 - 5]) || l:cur > (l:w1 + 5)
         call llama#nep_hide()
     endif
 endfunction
@@ -2588,6 +2593,7 @@ function! s:nep_build_sweep_prompt(file_path, l0, l1, pos_x, pos_y) abort
     call add(l:parts, '<|file_sep|>current/' . a:file_path)
     call add(l:parts, l:current_content)
     call add(l:parts, '<|file_sep|>updated/' . a:file_path)
+    call add(l:parts, '')
 
     return join(l:parts, "\n")
 endfunction
@@ -2762,6 +2768,8 @@ function! s:nep_render(bufnr, filepath, l0, l1, predicted) abort
         \ 'filepath': a:filepath,
         \ 'l0': l:change_l0,
         \ 'l1': l:change_l1,
+        \ 'window_l0': a:l0,
+        \ 'window_l1': a:l1,
         \ 'original_lines': l:slice_orig,
         \ 'updated_lines': l:slice_upd,
         \ 'format': g:llama_config.nep_format,
@@ -2833,7 +2841,7 @@ endfunction
 
 function! llama#nep_accept() abort
     if !s:nep_shown || empty(s:nep_data)
-        return v:false
+        return 0
     endif
 
     let l:bufnr = s:nep_data.bufnr
@@ -2860,28 +2868,34 @@ function! llama#nep_accept() abort
     call s:nep_replace_range(l:bufnr, l:l0, l:l1, l:updated_lines)
 
     let s:buffer_snapshots[l:bufnr] = getbufline(l:bufnr, 1, '$')
-    call cursor(l:l0, 1)
+    call cursor(max([1, l:l0]), 1)
 
     echo 'llama.vim: Applied Next Edit (' . l:format . ')'
-    return v:true
+    return 1
 endfunction
 
 function! s:nep_replace_range(bufnr, l0, l1, new_lines) abort
-    if a:l0 <= a:l1
-        let l:total = len(getbufline(a:bufnr, 1, '$'))
-        if a:l0 == 1 && a:l1 >= l:total
-            call deletebufline(a:bufnr, 1, '$')
-            call setbufline(a:bufnr, 1, a:new_lines)
-            return
-        endif
-
-        call deletebufline(a:bufnr, a:l0, a:l1)
-        if !empty(a:new_lines)
-            call appendbufline(a:bufnr, a:l0 - 1, a:new_lines)
-        endif
+    if s:ghost_text_nvim
+        let l:start = a:l0 <= a:l1 ? (a:l0 - 1) : a:l1
+        let l:end   = a:l0 <= a:l1 ? a:l1 : a:l1
+        call nvim_buf_set_lines(a:bufnr, l:start, l:end, v:false, a:new_lines)
     else
-        " Pure insertion after line a:l1
-        call appendbufline(a:bufnr, a:l1, a:new_lines)
+        if a:l0 <= a:l1
+            let l:total = len(getbufline(a:bufnr, 1, '$'))
+            if a:l0 == 1 && a:l1 >= l:total
+                call deletebufline(a:bufnr, 1, '$')
+                call setbufline(a:bufnr, 1, a:new_lines)
+                return
+            endif
+
+            call deletebufline(a:bufnr, a:l0, a:l1)
+            if !empty(a:new_lines)
+                call appendbufline(a:bufnr, a:l0 - 1, a:new_lines)
+            endif
+        else
+            " Pure insertion after line a:l1
+            call appendbufline(a:bufnr, a:l1, a:new_lines)
+        endif
     endif
 endfunction
 
@@ -2923,7 +2937,7 @@ function! llama#nep_hide() abort
 endfunction
 
 function! llama#is_nep_shown() abort
-    return s:nep_shown
+    return s:nep_shown ? 1 : 0
 endfunction
 
 function! llama#nep_diffs() abort
