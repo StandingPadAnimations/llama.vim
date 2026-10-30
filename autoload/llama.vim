@@ -102,6 +102,7 @@ let s:default_config = {
     \ 'n_prefix':               256,
     \ 'n_suffix':               64,
     \ 'n_predict':              128,
+    \ 'n_predict_nep':          512,
     \ 'stop_strings_fim':       [],
     \ 'stop_strings_inst':      [],
     \ 'stop_strings_nep':       ['<|file_sep|>', '</s>', '>>>>>>> UPDATED', '<<<<<<< CURRENT'],
@@ -561,6 +562,7 @@ function! llama#init()
     let s:nep_shown = v:false
     let s:nep_data = {}
     let s:buffer_snapshots = {}
+    let s:buffer_prev_snapshots = {}
     let s:recent_diffs = []
     let s:timer_nep = -1
     let s:timer_nep_change = -1
@@ -2306,6 +2308,7 @@ function! s:nep_snapshot_buffer(bufnr) abort
     endif
     if !has_key(s:buffer_snapshots, a:bufnr)
         let s:buffer_snapshots[a:bufnr] = getbufline(a:bufnr, 1, '$')
+        let s:buffer_prev_snapshots[a:bufnr] = copy(s:buffer_snapshots[a:bufnr])
     endif
 endfunction
 
@@ -2374,6 +2377,7 @@ function! s:nep_record_change(bufnr) abort
 
     if !has_key(s:buffer_snapshots, a:bufnr)
         let s:buffer_snapshots[a:bufnr] = copy(l:curr_lines)
+        let s:buffer_prev_snapshots[a:bufnr] = copy(l:curr_lines)
         return
     endif
 
@@ -2396,6 +2400,7 @@ function! s:nep_record_change(bufnr) abort
         endif
     endif
 
+    let s:buffer_prev_snapshots[a:bufnr] = copy(l:orig_lines)
     let s:buffer_snapshots[a:bufnr] = copy(l:curr_lines)
 endfunction
 
@@ -2499,7 +2504,7 @@ function! s:nep_dispatch(l0, l1, pos_x, pos_y, is_auto) abort
 
     let l:request = {
         \ 'prompt': l:prompt,
-        \ 'n_predict': g:llama_config.n_predict,
+        \ 'n_predict': get(g:llama_config, 'n_predict_nep', 512),
         \ 'temperature': 0.0,
         \ 'stop': g:llama_config.stop_strings_nep,
         \ 'stream': v:false,
@@ -2579,8 +2584,14 @@ function! s:nep_build_sweep_prompt(file_path, l0, l1, pos_x, pos_y) abort
 
     let l:bufnr = bufnr('%')
     let l:original_content = l:current_content
-    if has_key(s:buffer_snapshots, l:bufnr)
+    let l:snap = []
+    if has_key(s:buffer_prev_snapshots, l:bufnr)
+        let l:snap = s:buffer_prev_snapshots[l:bufnr]
+    elseif has_key(s:buffer_snapshots, l:bufnr)
         let l:snap = s:buffer_snapshots[l:bufnr]
+    endif
+
+    if !empty(l:snap)
         let l:snap_l0 = max([1, a:l0])
         let l:snap_l1 = min([len(l:snap), a:l1])
         if l:snap_l0 <= l:snap_l1
@@ -2722,6 +2733,9 @@ function! s:nep_render(bufnr, filepath, l0, l1, predicted) abort
 
     let l:pred_clean = substitute(a:predicted, '\r\n', '\n', 'g')
     let l:updated_lines = split(l:pred_clean, "\n", 1)
+    if len(l:updated_lines) > 0 && l:updated_lines[0] ==# '' && (empty(l:orig_lines) || l:orig_lines[0] !=# '')
+        call remove(l:updated_lines, 0)
+    endif
     while len(l:updated_lines) > 0 && l:updated_lines[-1] ==# '' && (empty(l:orig_lines) || l:orig_lines[-1] !=# '')
         call remove(l:updated_lines, -1)
     endwhile
@@ -2867,6 +2881,7 @@ function! llama#nep_accept() abort
     " Apply edit to buffer
     call s:nep_replace_range(l:bufnr, l:l0, l:l1, l:updated_lines)
 
+    let s:buffer_prev_snapshots[l:bufnr] = copy(get(s:buffer_snapshots, l:bufnr, []))
     let s:buffer_snapshots[l:bufnr] = getbufline(l:bufnr, 1, '$')
     call cursor(max([1, l:l0]), 1)
 

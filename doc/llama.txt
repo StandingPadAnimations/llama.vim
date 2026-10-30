@@ -181,6 +181,7 @@ Currently the default config is:
 		    \ 'fim_debounce_ms':        100,
 		    \ 'nep_debounce_ms':        200,
 		    \ 'nep_window_lines':       16,
+		    \ 'n_predict_nep':          512,
 		    \ 'nep_max_diffs':          5,
 		    \ 'max_line_suffix':        8,
 		    \ 'max_cache_keys':         250,
@@ -248,6 +249,8 @@ Currently the default config is:
 
 - {nep_max_diffs}		max number of recent diffs to track and include in prompt
 						(default: 5)
+
+- {n_predict_nep}		maximum number of tokens to predict for NEP (default: 512)
 
 - {stop_strings_nep}	stop sequences for Next Edit Prediction generation
 
