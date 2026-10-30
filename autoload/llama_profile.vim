@@ -5,6 +5,7 @@
 let s:default_profile = g:llama_config.profile
 let s:default_endpoint_fim   = g:llama_config.endpoint_fim
 let s:default_endpoint_inst  = g:llama_config.endpoint_inst
+let s:default_endpoint_nep   = get(g:llama_config, 'endpoint_nep', 'http://127.0.0.1:8012/completion')
 
 function! llama_profile#names() abort
     if type(g:llama_config.profiles) != v:t_dict
@@ -71,6 +72,7 @@ endfunction
 function! llama_profile#reset() abort
     let g:llama_config.endpoint_fim   = s:default_endpoint_fim
     let g:llama_config.endpoint_inst  = s:default_endpoint_inst
+    let g:llama_config.endpoint_nep   = s:default_endpoint_nep
     let g:llama_config.profile = s:default_profile
 
     if !empty(s:default_profile)
@@ -149,6 +151,7 @@ function! llama_profile#select(name, ...) abort
     let l:base = substitute(l:base, '/\+$', '', '')
     let g:llama_config.endpoint_fim = l:base . '/infill'
     let g:llama_config.endpoint_inst = l:base . '/v1/chat/completions'
+    let g:llama_config.endpoint_nep = l:base . '/completion'
     let g:llama_config.profile = a:name
 
         call llama#profile_changed()

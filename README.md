@@ -30,6 +30,7 @@ https://github.com/user-attachments/assets/68bff15b-2d91-4800-985d-b7f110a0ccb7
 - Accept a suggestion with `Tab`
 - Accept the first line of a suggestion with `Shift+Tab`
 - Instruction-based editing with `<leader>lli`
+- Next Edit Prediction (NEP) with models like Sweep and Zeta (`<leader>lle`)
 - Control max text generation time
 - Configure scope of context around the cursor
 - Ring context with chunks from open and edited files and yanked text
@@ -144,6 +145,24 @@ And then in the server configuration, something like the following can be used:
 alias                = inst_model,pi
 ```
 And likewise for the fim_model.
+
+7. Configure Next Edit Prediction (NEP):
+
+    ```vim
+    " Configure Next Edit Prediction (Sweep, Zeta, etc.)
+    let g:llama_config.endpoint_nep   = 'http://127.0.0.1:8012/completion'
+    let g:llama_config.model_nep      = 'sweep-next-edit-1.5B'
+    let g:llama_config.nep_format     = 'sweep'  " or 'zeta2', 'zeta'
+    let g:llama_config.auto_nep       = v:false  " set to v:true to predict automatically after edits
+
+    " Keymaps:
+    let g:llama_config.keymap_nep_trigger = "<leader>lle"
+    let g:llama_config.keymap_nep_accept  = "<Tab>"
+    let g:llama_config.keymap_nep_cancel  = "<Esc>"
+    ```
+
+    Trigger with `<leader>lle` (in normal, insert, or visual mode) or `:LlamaNextEdit`.
+    View the tracked edit history used for prompt context with `:LlamaNextEditDiffs`.
 
 Please refer to `:help llama_config` or the [source](./autoload/llama.vim)
 for the full list of options.

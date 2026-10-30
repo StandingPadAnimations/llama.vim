@@ -13,27 +13,42 @@ highlight default llama_hl_fim_info guifg=#77ff2f ctermfg=119
  highlight default llama_hl_inst_virt_gen   guifg=#77ff2f ctermfg=119
  highlight default llama_hl_inst_virt_ready guifg=#ff772f ctermfg=202
 
+ " next edit prediction colors
+ highlight default llama_hl_nep_src         guibg=#443355 ctermbg=53
+ highlight default llama_hl_nep_preview     guifg=#ff9933 ctermfg=208
+ highlight default llama_hl_nep_info        guifg=#77ff2f ctermfg=119
+ highlight default llama_hl_nep_virt_proc   guifg=#77ff2f ctermfg=119
+ highlight default llama_hl_nep_virt_ready  guifg=#ff9933 ctermfg=208
+
 " general parameters:
 "
 "   endpoint_fim:     llama.cpp server endpoint for FIM completion
 "   endpoint_inst:    llama.cpp server endpoint for instruction completion
+"   endpoint_nep:     llama.cpp server endpoint for next edit prediction
 "   profiles:         named llama.cpp profiles
 "   profile:          profile selected at startup (empty to use the endpoints above)
 "   model_fim:        model name in case when multiple models are loaded (optional, recommended: Qwen3 Coder 30B)
 "   model_inst:       instruction model name (optional, recommended: gpt-oss-120b)
+"   model_nep:        next edit prediction model name (optional, e.g.: sweep-next-edit-1.5b)
+"   nep_format:       next edit prediction prompt format ('sweep' [default], 'zeta2', 'zeta')
 "   api_key:          llama.cpp server api key (optional)
 "   n_prefix:         number of lines before the cursor location to include in the local prefix
 "   n_suffix:         number of lines after  the cursor location to include in the local suffix
 "   n_predict:        max number of tokens to predict
 "   stop_strings_fim  return the result immediately as soon as any of these strings are encountered in the generated text for FIM completions
 "   stop_strings_inst return the result immediately as soon as any of these strings are encountered in the generated text for instruction completions
+"   stop_strings_nep  return the result immediately as soon as any of these strings are encountered in the generated text for next edit completions
 "   n_cmpl:           number of completions to cache per position (ring buffer, default: 1)
 "   t_max_prompt_ms:  max allowed time for the prompt processing (TODO: not yet supported)
 "   t_max_predict_ms: max allowed time for the prediction
 "   show_info:        show extra info about the inference (0 - disabled, 1 - statusline, 2 - inline)
 "   info_compact:     info message length (0 - full, 1 - short ms and t/s, 2 - remove t/s, 3 - also remove e:, q:, C:, 4 - only c: and r:)
 "   auto_fim:         trigger FIM completion automatically on cursor movement
+"   auto_nep:         trigger next edit prediction automatically after edits (default: v:false)
 "   fim_debounce_ms:  delay (in ms) before retrying a FIM completion when one is already in progress
+"   nep_debounce_ms:  delay (in ms) before triggering next edit prediction
+"   nep_window_lines: number of lines around cursor for next edit prediction window
+"   nep_max_diffs:    max number of recent edit diffs to track and include in prompt
 "   max_line_suffix:  do not auto-trigger FIM completion if there are more than this number of characters to the right of the cursor
 "   max_cache_keys:   max number of cached completions to keep in result_cache
 "   enable_at_startup: enable llama.vim functionality at startup (default: v:true)
@@ -69,27 +84,38 @@ highlight default llama_hl_fim_info guifg=#77ff2f ctermfg=119
 "   keymap_inst_continue:   keymap to continue the instruction, default: <leader>llc
 "   keymap_inst_accept:     keymap to accept the instruction, default: <Tab>
 "   keymap_inst_cancel:     keymap to cancel the instruction, default: <Esc>
+"   keymap_nep_trigger:     keymap to trigger next edit prediction, default: <leader>lle
+"   keymap_nep_accept:      keymap to accept next edit prediction, default: <Tab>
+"   keymap_nep_cancel:      keymap to cancel next edit prediction, default: <Esc>
 "
 let s:default_config = {
     \ 'endpoint_fim':           'http://127.0.0.1:8012/infill',
     \ 'endpoint_inst':          'http://127.0.0.1:8012/v1/chat/completions',
+    \ 'endpoint_nep':           'http://127.0.0.1:8012/completion',
     \ 'profiles':               {},
     \ 'profile':                '',
     \ 'model_fim':              '',
     \ 'model_inst':             '',
+    \ 'model_nep':              '',
+    \ 'nep_format':             'sweep',
     \ 'api_key':                '',
     \ 'n_prefix':               256,
     \ 'n_suffix':               64,
     \ 'n_predict':              128,
     \ 'stop_strings_fim':       [],
     \ 'stop_strings_inst':      [],
+    \ 'stop_strings_nep':       ['<|file_sep|>', '</s>', '>>>>>>> UPDATED', '<<<<<<< CURRENT'],
     \ 'n_cmpl':                 1,
     \ 't_max_prompt_ms':        500,
     \ 't_max_predict_ms':       1000,
     \ 'show_info':              2,
     \ 'info_compact':           3,
     \ 'auto_fim':               v:true,
+    \ 'auto_nep':               v:false,
     \ 'fim_debounce_ms':        100,
+    \ 'nep_debounce_ms':        200,
+    \ 'nep_window_lines':       16,
+    \ 'nep_max_diffs':          5,
     \ 'max_line_suffix':        8,
     \ 'max_cache_keys':         250,
     \ 'ring_n_chunks':          16,
@@ -107,6 +133,9 @@ let s:default_config = {
     \ 'keymap_inst_continue':   "<leader>llc",
     \ 'keymap_inst_accept':     "<Tab>",
     \ 'keymap_inst_cancel':     "<Esc>",
+    \ 'keymap_nep_trigger':     "<leader>lle",
+    \ 'keymap_nep_accept':      "<Tab>",
+    \ 'keymap_nep_cancel':      "<Esc>",
     \ 'keymap_debug_toggle':    "<leader>lld",
     \ 'enable_at_startup':      v:true,
     \ }
@@ -231,8 +260,28 @@ endfunction
 
 function! llama#disable()
     call llama#fim_hide()
+    call llama#nep_hide()
 
     autocmd! llama
+
+    if s:current_job_nep != v:null
+        if s:ghost_text_nvim
+            call jobstop(s:current_job_nep)
+        elseif s:ghost_text_vim
+            call job_stop(s:current_job_nep)
+        endif
+        let s:current_job_nep = v:null
+    endif
+
+    if s:timer_nep != -1
+        call timer_stop(s:timer_nep)
+        let s:timer_nep = -1
+    endif
+
+    if s:timer_nep_change != -1
+        call timer_stop(s:timer_nep_change)
+        let s:timer_nep_change = -1
+    endif
 
     " TODO: these unmaps don't seem to work properly
     if g:llama_config.keymap_fim_trigger != ''
@@ -272,6 +321,11 @@ function! llama#disable()
     if g:llama_config.keymap_inst_cancel != ''
         exe "silent!  unmap          " .. g:llama_config.keymap_inst_cancel
     endif
+    if g:llama_config.keymap_nep_trigger != ''
+        exe "silent!  unmap          " .. g:llama_config.keymap_nep_trigger
+        exe "silent! vunmap          " .. g:llama_config.keymap_nep_trigger
+        exe "silent! iunmap <buffer> " .. g:llama_config.keymap_nep_trigger
+    endif
 
     let s:llama_enabled = v:false
 
@@ -296,19 +350,35 @@ function! llama#toggle_auto_fim()
     call llama#setup_autocmds()
 endfunction
 
+function! llama#toggle_auto_nep()
+    if !s:llama_enabled
+        return
+    endif
+
+    let g:llama_config.auto_nep = !g:llama_config.auto_nep
+
+    call llama#setup_autocmds()
+endfunction
+
 function! llama#status()
     let l:fim_base = substitute(g:llama_config.endpoint_fim, '/infill$', '', '')
     let l:inst_base = substitute(g:llama_config.endpoint_inst, '/v1/chat/completions$', '', '')
+    let l:nep_base = substitute(g:llama_config.endpoint_nep, '/\(completion\|v1/completions\)$', '', '')
 
-    let s:status_messages = {'fim': '', 'inst': '', 'count': 0,
+    let s:status_messages = {'fim': '', 'inst': '', 'nep': '', 'count': 0, 'total': 0,
         \ 'profile': get(g:llama_config, 'profile', '')}
 
-    " If both endpoints are the same then we are running llama-server as a
-    " router. Otherwise each are independent servers.
-    if l:fim_base ==# l:inst_base
+    " If endpoints are the same then we are running llama-server as a router.
+    if !empty(g:llama_config.model_nep) && l:nep_base ==# l:fim_base && l:fim_base ==# l:inst_base
+        let s:status_messages.total = 1
+        let l:models_url = l:fim_base . '/v1/models'
+        call s:fetch_status(l:models_url, 'all')
+    elseif l:fim_base ==# l:inst_base
+        let s:status_messages.total = 1
         let l:models_url = l:fim_base . '/v1/models'
         call s:fetch_status(l:models_url, 'both')
     else
+        let s:status_messages.total = 2
         let l:fim_url = l:fim_base . '/v1/models'
         let l:inst_url = l:inst_base . '/v1/models'
 
@@ -355,7 +425,15 @@ function! s:status_on_response(type, job_id, data, event = v:null)
         let l:response = json_decode(l:raw)
         let l:models = get(l:response, 'data', [])
 
-        if a:type ==# 'both'
+        if a:type ==# 'all'
+            let l:fim_status = s:get_model_status(g:llama_config.model_fim, l:models)
+            let l:inst_status = s:get_model_status(g:llama_config.model_inst, l:models)
+            let l:nep_status = s:get_model_status(g:llama_config.model_nep, l:models)
+            echo s:status_prefix() . 'FIM model (' . g:llama_config.model_fim . '): '
+                \ . l:fim_status . ', Instruction model (' . g:llama_config.model_inst . '): '
+                \ . l:inst_status . ', NEP model (' . g:llama_config.model_nep . ' [' . g:llama_config.nep_format . ']): '
+                \ . l:nep_status
+        elseif a:type ==# 'both'
             let l:fim_status = s:get_model_status(g:llama_config.model_fim, l:models)
             let l:inst_status = s:get_model_status(g:llama_config.model_inst, l:models)
             echo s:status_prefix() . 'FIM model (' . g:llama_config.model_fim . '): '
@@ -380,7 +458,7 @@ endfunction
 function! s:status_on_exit(type, job_id, exit_code, event = v:null)
     if a:exit_code != 0
         call llama#debug_log('status_on_exit (' . a:type . '): curl failed with exit code ' . a:exit_code)
-        if a:type ==# 'both'
+        if a:type ==# 'all' || a:type ==# 'both'
             echo s:status_prefix() . 'LlamaStatus: ❌ Server not reachable'
         elseif a:type ==# 'fim'
             let s:status_messages.fim = 'FIM server: ❌ Not reachable'
@@ -440,6 +518,9 @@ function! llama#setup()
     command! LlamaDisable        call llama#disable()
     command! LlamaToggle         call llama#toggle()
     command! LlamaToggleAutoFim  call llama#toggle_auto_fim()
+    command! LlamaToggleAutoNep  call llama#toggle_auto_nep()
+    command! -range LlamaNextEdit call llama#nep_command(<line1>, <line2>)
+    command! LlamaNextEditDiffs  call llama#nep_show_diffs()
     command! LlamaStatus         call llama#status()
     command! -nargs=? -complete=customlist,llama#profile_complete LlamaProfile call llama#profile(<q-args>)
     command! LlamaProfileReset call llama#profile_reset()
@@ -476,6 +557,14 @@ function! llama#init()
 
     let s:current_job_fim  = v:null
 
+    let s:current_job_nep = v:null
+    let s:nep_shown = v:false
+    let s:nep_data = {}
+    let s:buffer_snapshots = {}
+    let s:recent_diffs = []
+    let s:timer_nep = -1
+    let s:timer_nep_change = -1
+
     let s:inst_reqs = {}
     let s:inst_req_id = 0
 
@@ -491,6 +580,9 @@ function! llama#init()
 
         let s:hlgroup_inst      = 'llama_hl_inst_src'
         let s:hlgroup_inst_info = 'llama_hl_inst_info'
+
+        let s:hlgroup_nep_src  = 'llama_hl_nep_src'
+        let s:hlgroup_nep_info = 'llama_hl_nep_info'
 
         if empty(prop_type_get(s:hlgroup_hint))
             call prop_type_add(s:hlgroup_hint, {'highlight': s:hlgroup_hint})
@@ -508,6 +600,13 @@ function! llama#init()
         if empty(prop_type_get(s:hlgroup_inst_info))
             call prop_type_add(s:hlgroup_inst_info, {'highlight': s:hlgroup_inst_info})
         endif
+
+        if empty(prop_type_get(s:hlgroup_nep_src))
+            call prop_type_add(s:hlgroup_nep_src, {'highlight': s:hlgroup_nep_src})
+        endif
+        if empty(prop_type_get(s:hlgroup_nep_info))
+            call prop_type_add(s:hlgroup_nep_info, {'highlight': s:hlgroup_nep_info})
+        endif
     endif
 
     call llama_profile#restore()
@@ -524,6 +623,7 @@ function! llama#setup_autocmds()
     augroup llama
         autocmd!
         autocmd InsertLeavePre  * call llama#fim_hide()
+        autocmd InsertLeavePre  * call llama#nep_hide()
 
         autocmd CompleteChanged * call llama#fim_hide()
         autocmd CompleteDone    * call s:on_move()
@@ -535,14 +635,24 @@ function! llama#setup_autocmds()
             autocmd CursorMovedI * call llama#fim(-1, -1, v:true, [], v:true)
         endif
 
+        " Track buffer changes for Next Edit Prediction (NEP)
+        autocmd InsertLeave     * call s:nep_on_insert_leave()
+        autocmd TextChanged     * call s:nep_on_text_changed()
+
+        " Hide NEP suggestion if cursor moves away
+        autocmd CursorMoved     * if s:nep_shown | call s:nep_on_move() | endif
+        autocmd CursorMovedI    * if s:nep_shown | call s:nep_on_move() | endif
+
         " gather chunks upon yanking
         autocmd TextYankPost    * if v:event.operator ==# 'y' | call s:pick_chunk(v:event.regcontents, v:false, v:true) | endif
 
         " gather chunks upon entering/leaving a buffer
+        autocmd BufEnter        * call s:nep_snapshot_buffer(bufnr('%'))
         autocmd BufEnter        * call timer_start(100, {-> s:pick_chunk(getline(max([1, line('.') - g:llama_config.ring_chunk_size/2]), min([line('.') + g:llama_config.ring_chunk_size/2, line('$')])), v:true, v:true)})
         autocmd BufLeave        * call                      s:pick_chunk(getline(max([1, line('.') - g:llama_config.ring_chunk_size/2]), min([line('.') + g:llama_config.ring_chunk_size/2, line('$')])), v:true, v:true)
 
         " gather chunk upon saving the file
+        autocmd BufWritePost    * call s:nep_record_change(bufnr('%'))
         autocmd BufWritePost    * call s:pick_chunk(getline(max([1, line('.') - g:llama_config.ring_chunk_size/2]), min([line('.') + g:llama_config.ring_chunk_size/2, line('$')])), v:true, v:true)
     augroup END
 endfunction
@@ -576,9 +686,16 @@ function! llama#enable()
         exe "nnoremap <silent> " .. g:llama_config.keymap_inst_cancel   .. " :call llama#inst_cancel()<CR>"
     endif
 
+    if g:llama_config.keymap_nep_trigger != ''
+        exe "nnoremap <silent> " .. g:llama_config.keymap_nep_trigger .. " :call llama#nep(-1, -1)<CR>"
+        exe "vnoremap <silent> " .. g:llama_config.keymap_nep_trigger .. " :<C-u>call llama#nep_range(line(\"'<\"), line(\"'>\"))<CR>"
+        exe "autocmd InsertEnter * inoremap <buffer> <silent> " . g:llama_config.keymap_nep_trigger . " <C-O>:call llama#nep(-1, -1)<CR>"
+    endif
+
     call llama#setup_autocmds()
 
     silent! call llama#fim_hide()
+    silent! call llama#nep_hide()
 
     " init background update of the ring buffer
     if g:llama_config.ring_n_chunks > 0
@@ -2176,6 +2293,603 @@ function! llama#inst_continue()
 endfunction
 
 " =====================================
+" Next Edit Prediction (NEP)
+" =====================================
+
+" Take a snapshot of a buffer if not already tracked
+function! s:nep_snapshot_buffer(bufnr) abort
+    if !bufexists(a:bufnr) || !buflisted(a:bufnr)
+        return
+    endif
+    if !has_key(s:buffer_snapshots, a:bufnr)
+        let s:buffer_snapshots[a:bufnr] = getbufline(a:bufnr, 1, '$')
+    endif
+endfunction
+
+" Extract diff between two line lists (common prefix & suffix trim with surrounding context)
+function! s:nep_compute_diff(orig_lines, curr_lines) abort
+    let l:len_orig = len(a:orig_lines)
+    let l:len_curr = len(a:curr_lines)
+    let l:min_len = min([l:len_orig, l:len_curr])
+
+    let l:prefix_len = 0
+    while l:prefix_len < l:min_len && a:orig_lines[l:prefix_len] ==# a:curr_lines[l:prefix_len]
+        let l:prefix_len += 1
+    endwhile
+
+    let l:suffix_len = 0
+    let l:max_suffix = l:min_len - l:prefix_len
+    while l:suffix_len < l:max_suffix && a:orig_lines[l:len_orig - 1 - l:suffix_len] ==# a:curr_lines[l:len_curr - 1 - l:suffix_len]
+        let l:suffix_len += 1
+    endwhile
+
+    let l:orig_start = l:prefix_len
+    let l:orig_end = l:len_orig - 1 - l:suffix_len
+    let l:curr_start = l:prefix_len
+    let l:curr_end = l:len_curr - 1 - l:suffix_len
+
+    let l:ctx_start_orig = max([0, l:orig_start - 2])
+    let l:ctx_end_orig = min([l:len_orig - 1, l:orig_end + 2])
+    let l:ctx_start_curr = max([0, l:curr_start - 2])
+    let l:ctx_end_curr = min([l:len_curr - 1, l:curr_end + 2])
+
+    if l:orig_start <= l:orig_end
+        let l:orig_slice = a:orig_lines[l:ctx_start_orig : l:ctx_end_orig]
+    else
+        let l:orig_slice = a:orig_lines[max([0, l:prefix_len - 2]) : min([l:len_orig - 1, l:prefix_len + 1])]
+    endif
+
+    if l:curr_start <= l:curr_end
+        let l:curr_slice = a:curr_lines[l:ctx_start_curr : l:ctx_end_curr]
+    else
+        let l:curr_slice = a:curr_lines[max([0, l:prefix_len - 2]) : min([l:len_curr - 1, l:prefix_len + 1])]
+    endif
+
+    return {
+        \ 'original': join(l:orig_slice, "\n"),
+        \ 'updated': join(l:curr_slice, "\n"),
+        \ 'line_start': l:curr_start + 1,
+        \ 'line_end': max([l:curr_start + 1, l:curr_end + 1]),
+        \ }
+endfunction
+
+" Record edits made in a buffer into s:recent_diffs
+function! s:nep_record_change(bufnr) abort
+    if !bufexists(a:bufnr) || !buflisted(a:bufnr)
+        return
+    endif
+
+    let l:filepath = bufname(a:bufnr)
+    if empty(l:filepath)
+        return
+    endif
+
+    let l:curr_lines = getbufline(a:bufnr, 1, '$')
+    if empty(l:curr_lines)
+        return
+    endif
+
+    if !has_key(s:buffer_snapshots, a:bufnr)
+        let s:buffer_snapshots[a:bufnr] = copy(l:curr_lines)
+        return
+    endif
+
+    let l:orig_lines = s:buffer_snapshots[a:bufnr]
+    if l:orig_lines ==# l:curr_lines
+        return
+    endif
+
+    let l:diff = s:nep_compute_diff(l:orig_lines, l:curr_lines)
+    if !empty(l:diff)
+        let l:diff['file_path'] = l:filepath
+        let l:diff['time'] = reltime()
+
+        if empty(s:recent_diffs) || s:recent_diffs[-1]['original'] !=# l:diff['original'] || s:recent_diffs[-1]['updated'] !=# l:diff['updated']
+            call add(s:recent_diffs, l:diff)
+            if len(s:recent_diffs) > g:llama_config.nep_max_diffs
+                call remove(s:recent_diffs, 0)
+            endif
+            call llama#debug_log('nep_record_change', printf('recorded diff in %s (lines: %d-%d)', l:filepath, l:diff.line_start, l:diff.line_end))
+        endif
+    endif
+
+    let s:buffer_snapshots[a:bufnr] = copy(l:curr_lines)
+endfunction
+
+function! s:nep_on_insert_leave() abort
+    call s:nep_record_change(bufnr('%'))
+    if g:llama_config.auto_nep
+        if s:timer_nep != -1
+            call timer_stop(s:timer_nep)
+            let s:timer_nep = -1
+        endif
+        let s:timer_nep = timer_start(g:llama_config.nep_debounce_ms, {-> llama#nep(-1, -1, v:true)})
+    endif
+endfunction
+
+function! s:nep_on_text_changed() abort
+    if s:timer_nep_change != -1
+        call timer_stop(s:timer_nep_change)
+        let s:timer_nep_change = -1
+    endif
+    let s:timer_nep_change = timer_start(500, {-> s:nep_on_text_changed_timer()})
+endfunction
+
+function! s:nep_on_text_changed_timer() abort
+    let s:timer_nep_change = -1
+    call s:nep_record_change(bufnr('%'))
+    if g:llama_config.auto_nep
+        call llama#nep(-1, -1, v:true)
+    endif
+endfunction
+
+function! s:nep_on_move() abort
+    if !s:nep_shown || empty(s:nep_data)
+        return
+    endif
+    let l:cur = line('.')
+    if l:cur < s:nep_data.l0 || l:cur > s:nep_data.l1
+        call llama#nep_hide()
+    endif
+endfunction
+
+function! llama#nep_command(l0, l1) abort
+    if a:l0 != a:l1
+        call llama#nep_range(a:l0, a:l1)
+    else
+        call llama#nep(-1, -1)
+    endif
+endfunction
+
+function! llama#nep_range(l0, l1) abort
+    let l:pos_x = col('.') - 1
+    let l:pos_y = line('.')
+    call s:nep_dispatch(a:l0, a:l1, l:pos_x, l:pos_y, v:false)
+endfunction
+
+function! llama#nep(pos_x, pos_y, is_auto = v:false) abort
+    if !s:llama_enabled
+        return
+    endif
+
+    let l:filepath = expand('%')
+    if empty(l:filepath)
+        return
+    endif
+
+    let l:pos_x = a:pos_x < 0 ? col('.') - 1 : a:pos_x
+    let l:pos_y = a:pos_y < 0 ? line('.') : a:pos_y
+
+    let l:window = g:llama_config.nep_window_lines
+    let l:l0 = max([1, l:pos_y - l:window])
+    let l:l1 = min([line('$'), l:pos_y + l:window])
+
+    call s:nep_dispatch(l:l0, l:l1, l:pos_x, l:pos_y, a:is_auto)
+endfunction
+
+function! s:nep_dispatch(l0, l1, pos_x, pos_y, is_auto) abort
+    let l:filepath = expand('%')
+    let l:bufnr = bufnr('%')
+
+    " Debounce if job is already in progress
+    if s:current_job_nep != v:null
+        if s:timer_nep != -1
+            call timer_stop(s:timer_nep)
+            let s:timer_nep = -1
+        endif
+        let s:timer_nep = timer_start(g:llama_config.nep_debounce_ms, {-> s:nep_dispatch(a:l0, a:l1, a:pos_x, a:pos_y, a:is_auto)})
+        return
+    endif
+
+    let l:fmt = g:llama_config.nep_format
+    if l:fmt ==# 'zeta' || l:fmt ==# 'zeta2'
+        let l:prompt = s:nep_build_zeta_prompt(l:filepath, a:l0, a:l1, a:pos_x, a:pos_y)
+    else
+        let l:prompt = s:nep_build_sweep_prompt(l:filepath, a:l0, a:l1, a:pos_x, a:pos_y)
+    endif
+
+    let l:request = {
+        \ 'prompt': l:prompt,
+        \ 'n_predict': g:llama_config.n_predict,
+        \ 'temperature': 0.0,
+        \ 'stop': g:llama_config.stop_strings_nep,
+        \ 'stream': v:false,
+        \ 'cache_prompt': v:true,
+        \ }
+
+    if !empty(g:llama_config.model_nep)
+        let l:request['model'] = g:llama_config.model_nep
+    endif
+
+    let l:curl_command = [
+        \ "curl",
+        \ "--silent",
+        \ "--no-buffer",
+        \ "--request", "POST",
+        \ "--url", g:llama_config.endpoint_nep,
+        \ "--header", "Content-Type: application/json",
+        \ "--data", "@-",
+        \ ]
+
+    if exists("g:llama_config.api_key") && len(g:llama_config.api_key) > 0
+        call extend(l:curl_command, ['--header', 'Authorization: Bearer ' .. g:llama_config.api_key])
+    endif
+
+    let l:request_json = json_encode(l:request)
+
+    call llama#debug_log('nep_dispatch', 'Sending NEP request (' . l:fmt . ') for lines ' . a:l0 . '-' . a:l1)
+
+    if s:ghost_text_nvim
+        let s:current_job_nep = jobstart(l:curl_command, {
+            \ 'on_stdout': function('s:nep_on_response', [l:filepath, a:l0, a:l1, a:pos_x, a:pos_y, l:bufnr]),
+            \ 'on_exit':   function('s:nep_on_exit'),
+            \ 'stdout_buffered': v:true,
+            \ })
+        call chansend(s:current_job_nep, l:request_json)
+        call chanclose(s:current_job_nep, 'stdin')
+    elseif s:ghost_text_vim
+        let s:current_job_nep = job_start(l:curl_command, {
+            \ 'out_cb':  function('s:nep_on_response', [l:filepath, a:l0, a:l1, a:pos_x, a:pos_y, l:bufnr]),
+            \ 'exit_cb': function('s:nep_on_exit'),
+            \ })
+        let l:channel = job_getchannel(s:current_job_nep)
+        call ch_sendraw(l:channel, l:request_json)
+        call ch_close_in(l:channel)
+    endif
+endfunction
+
+" Build prompt following Sweep Next-Edit format
+function! s:nep_build_sweep_prompt(file_path, l0, l1, pos_x, pos_y) abort
+    let l:parts = []
+
+    " 1. Context files from ring buffer
+    let l:seen_files = {}
+    let l:seen_files[a:file_path] = 1
+
+    for l:chunk in s:ring_chunks
+        let l:c_fn = get(l:chunk, 'filename', '')
+        if !empty(l:c_fn) && !has_key(l:seen_files, l:c_fn)
+            let l:seen_files[l:c_fn] = 1
+            call add(l:parts, '<|file_sep|>' . l:c_fn)
+            call add(l:parts, l:chunk.str)
+        endif
+    endfor
+
+    " 2. Recent diffs
+    for l:diff in s:recent_diffs
+        call add(l:parts, '<|file_sep|>' . l:diff.file_path . '.diff')
+        call add(l:parts, "original:")
+        call add(l:parts, l:diff.original)
+        call add(l:parts, "updated:")
+        call add(l:parts, l:diff.updated)
+    endfor
+
+    " 3. Current editable region
+    let l:current_slice = getline(a:l0, a:l1)
+    let l:current_content = join(l:current_slice, "\n")
+
+    let l:bufnr = bufnr('%')
+    let l:original_content = l:current_content
+    if has_key(s:buffer_snapshots, l:bufnr)
+        let l:snap = s:buffer_snapshots[l:bufnr]
+        let l:snap_l0 = max([1, a:l0])
+        let l:snap_l1 = min([len(l:snap), a:l1])
+        if l:snap_l0 <= l:snap_l1
+            let l:original_content = join(l:snap[l:snap_l0 - 1 : l:snap_l1 - 1], "\n")
+        endif
+    endif
+
+    call add(l:parts, '<|file_sep|>original/' . a:file_path)
+    call add(l:parts, l:original_content)
+    call add(l:parts, '<|file_sep|>current/' . a:file_path)
+    call add(l:parts, l:current_content)
+    call add(l:parts, '<|file_sep|>updated/' . a:file_path)
+
+    return join(l:parts, "\n")
+endfunction
+
+" Build prompt following Zeta 2 (Seed-Coder) SPM format
+function! s:nep_build_zeta_prompt(file_path, l0, l1, pos_x, pos_y) abort
+    let l:max_y = line('$')
+    let l:prefix_lines = a:l0 > 1 ? getline(max([1, a:l0 - g:llama_config.n_prefix]), a:l0 - 1) : []
+    let l:suffix_lines = a:l1 < l:max_y ? getline(a:l1 + 1, min([l:max_y, a:l1 + g:llama_config.n_suffix])) : []
+
+    " Insert <|user_cursor|> in editable region
+    let l:edit_lines = getline(a:l0, a:l1)
+    let l:cursor_idx = a:pos_y - a:l0
+    if l:cursor_idx >= 0 && l:cursor_idx < len(l:edit_lines)
+        let l:line = l:edit_lines[l:cursor_idx]
+        let l:col = min([len(l:line), a:pos_x])
+        let l:edit_lines[l:cursor_idx] = l:line[:l:col - 1] . '<|user_cursor|>' . l:line[l:col:]
+    endif
+
+    let l:prompt = "<[fim-suffix]>\n"
+    if !empty(l:suffix_lines)
+        let l:prompt .= join(l:suffix_lines, "\n") . "\n"
+    endif
+
+    let l:prompt .= "<[fim-prefix]>"
+
+    " Related files
+    for l:chunk in s:ring_chunks
+        let l:c_fn = get(l:chunk, 'filename', '')
+        if !empty(l:c_fn) && l:c_fn !=# a:file_path
+            let l:prompt .= "<filename>" . l:c_fn . "\n" . l:chunk.str . "\n"
+        endif
+    endfor
+
+    " Edit history (git diff format)
+    if !empty(s:recent_diffs)
+        let l:prompt .= "<filename>edit_history\n"
+        for l:diff in s:recent_diffs
+            let l:prompt .= "--- a/" . l:diff.file_path . "\n"
+            let l:prompt .= "+++ b/" . l:diff.file_path . "\n"
+            for l:line in split(l:diff.original, "\n")
+                let l:prompt .= "-" . l:line . "\n"
+            endfor
+            for l:line in split(l:diff.updated, "\n")
+                let l:prompt .= "+" . l:line . "\n"
+            endfor
+        endfor
+    endif
+
+    let l:prompt .= "<filename>" . a:file_path . "\n"
+    if !empty(l:prefix_lines)
+        let l:prompt .= join(l:prefix_lines, "\n") . "\n"
+    endif
+    let l:prompt .= "<<<<<<< CURRENT\n"
+    let l:prompt .= join(l:edit_lines, "\n") . "\n"
+    let l:prompt .= "=======\n"
+    let l:prompt .= "<[fim-middle]>"
+
+    return l:prompt
+endfunction
+
+function! s:nep_on_response(filepath, l0, l1, pos_x, pos_y, bufnr, job_id, data, event = v:null) abort
+    if s:ghost_text_nvim
+        let l:raw = join(a:data, "\n")
+    elseif s:ghost_text_vim
+        let l:raw = a:data
+    endif
+
+    if empty(l:raw)
+        return
+    endif
+
+    try
+        let l:decoded = json_decode(l:raw)
+    catch
+        call llama#debug_log('nep_on_response json decode error', l:raw)
+        return
+    endtry
+
+    let l:content = ''
+    if type(l:decoded) == v:t_dict
+        if has_key(l:decoded, 'content')
+            let l:content = l:decoded.content
+        elseif has_key(l:decoded, 'choices') && len(l:decoded.choices) > 0
+            let l:choice = l:decoded.choices[0]
+            if has_key(l:choice, 'text')
+                let l:content = l:choice.text
+            elseif has_key(l:choice, 'message') && has_key(l:choice.message, 'content')
+                let l:content = l:choice.message.content
+            endif
+        elseif has_key(l:decoded, 'response')
+            let l:content = l:decoded.response
+        endif
+    endif
+
+    if empty(l:content)
+        return
+    endif
+
+    " Format post-processing
+    if g:llama_config.nep_format ==# 'sweep'
+        let l:content = substitute(l:content, '<\s*|file_sep|\s*>.*$', '', '')
+        let l:content = substitute(l:content, '<\/s>.*$', '', '')
+    elseif g:llama_config.nep_format =~# '^zeta'
+        let l:content = substitute(l:content, '>>>>>>> UPDATED.*$', '', '')
+        let l:content = substitute(l:content, '<<<<<<< CURRENT.*$', '', '')
+    endif
+
+    if bufnr('%') == a:bufnr
+        call s:nep_render(a:bufnr, a:filepath, a:l0, a:l1, l:content)
+    endif
+endfunction
+
+function! s:nep_on_exit(job_id, exit_code, event = v:null) abort
+    if a:exit_code != 0
+        call llama#debug_log('nep_on_exit: job failed with exit code ' . a:exit_code)
+    endif
+    let s:current_job_nep = v:null
+endfunction
+
+function! s:nep_render(bufnr, filepath, l0, l1, predicted) abort
+    call llama#nep_hide()
+
+    let l:orig_lines = getbufline(a:bufnr, a:l0, a:l1)
+    let l:orig_text = join(l:orig_lines, "\n")
+
+    let l:pred_clean = substitute(a:predicted, '\r\n', '\n', 'g')
+    let l:updated_lines = split(l:pred_clean, "\n", 1)
+    while len(l:updated_lines) > 0 && l:updated_lines[-1] ==# '' && (empty(l:orig_lines) || l:orig_lines[-1] !=# '')
+        call remove(l:updated_lines, -1)
+    endwhile
+
+    let l:upd_text = join(l:updated_lines, "\n")
+    if l:orig_text ==# l:upd_text || empty(trim(l:upd_text))
+        call llama#debug_log('nep_render', 'Predicted text matches current text; no edit suggested')
+        return
+    endif
+
+    " Hide FIM hint if shown
+    call llama#fim_hide()
+
+    let s:nep_data = {
+        \ 'bufnr': a:bufnr,
+        \ 'filepath': a:filepath,
+        \ 'l0': a:l0,
+        \ 'l1': a:l1,
+        \ 'original_lines': l:orig_lines,
+        \ 'updated_lines': l:updated_lines,
+        \ 'format': g:llama_config.nep_format,
+        \ 'extmark_src': -1,
+        \ 'extmark_virt': -1,
+        \ }
+
+    if s:ghost_text_nvim
+        let l:ns = nvim_create_namespace('vt_nep')
+        let s:nep_data.extmark_src = nvim_buf_set_extmark(a:bufnr, l:ns, a:l0 - 1, 0, {
+            \ 'end_row': a:l1 - 1,
+            \ 'end_col': len(getline(a:l1)),
+            \ 'hl_group': 'llama_hl_nep_src',
+            \ })
+
+        let l:banner = '--- Next Edit (' . g:llama_config.nep_format . '): Tab to accept, Esc to cancel ---'
+        let l:virt_lines = [[[l:banner, 'llama_hl_nep_info']]]
+        for l:line in l:updated_lines
+            call add(l:virt_lines, [[l:line, 'llama_hl_nep_preview']])
+        endfor
+        call add(l:virt_lines, [[repeat('-', len(l:banner)), 'llama_hl_nep_info']])
+
+        let s:nep_data.extmark_virt = nvim_buf_set_extmark(a:bufnr, l:ns, a:l1 - 1, 0, {
+            \ 'virt_lines': l:virt_lines,
+            \ })
+    elseif s:ghost_text_vim
+        let l:prop_id = prop_add(a:l0, 1, {
+            \ 'type': 'llama_hl_nep_src',
+            \ 'end_lnum': a:l1,
+            \ 'end_col': len(getline(a:l1)) + 1,
+            \ })
+        let s:nep_data.extmark_src = l:prop_id
+
+        let l:info_text = ' Next Edit (' . g:llama_config.nep_format . '): <Tab> accept, <Esc> cancel'
+        call prop_add(a:l1, 0, {
+            \ 'type': 'llama_hl_nep_info',
+            \ 'text': l:info_text,
+            \ 'text_align': 'below',
+            \ })
+    endif
+
+    if g:llama_config.keymap_nep_accept != ''
+        exe 'nnoremap <buffer> <silent> ' . g:llama_config.keymap_nep_accept . ' :call llama#nep_accept()<CR>'
+        exe 'inoremap <buffer> <silent> ' . g:llama_config.keymap_nep_accept . ' <C-\><C-O>:call llama#nep_accept()<CR>'
+    endif
+    if g:llama_config.keymap_nep_cancel != ''
+        exe 'nnoremap <buffer> <silent> ' . g:llama_config.keymap_nep_cancel . ' :call llama#nep_cancel()<CR>'
+        exe 'inoremap <buffer> <silent> ' . g:llama_config.keymap_nep_cancel . ' <C-\><C-O>:call llama#nep_cancel()<CR>'
+    endif
+
+    let s:nep_shown = v:true
+    call llama#debug_log('nep_render', printf('Displayed NEP suggestion for lines %d-%d', a:l0, a:l1))
+endfunction
+
+function! llama#nep_accept() abort
+    if !s:nep_shown || empty(s:nep_data)
+        call feedkeys("\<Tab>", 'n')
+        return
+    endif
+
+    let l:bufnr = s:nep_data.bufnr
+    let l:l0 = s:nep_data.l0
+    let l:l1 = s:nep_data.l1
+    let l:updated_lines = s:nep_data.updated_lines
+    let l:format = get(s:nep_data, 'format', 'sweep')
+
+    let l:filepath = bufname(l:bufnr)
+    let l:diff = {
+        \ 'file_path': l:filepath,
+        \ 'original': join(s:nep_data.original_lines, "\n"),
+        \ 'updated': join(l:updated_lines, "\n"),
+        \ 'time': reltime(),
+        \ }
+    call add(s:recent_diffs, l:diff)
+    if len(s:recent_diffs) > g:llama_config.nep_max_diffs
+        call remove(s:recent_diffs, 0)
+    endif
+
+    call llama#nep_hide()
+
+    " Apply edit to buffer
+    call s:nep_replace_range(l:bufnr, l:l0, l:l1, l:updated_lines)
+
+    let s:buffer_snapshots[l:bufnr] = getbufline(l:bufnr, 1, '$')
+    call cursor(l:l0, 1)
+
+    echo 'llama.vim: Applied Next Edit (' . l:format . ')'
+endfunction
+
+function! s:nep_replace_range(bufnr, l0, l1, new_lines) abort
+    let l:total = len(getbufline(a:bufnr, 1, '$'))
+    if a:l0 == 1 && a:l1 >= l:total
+        call deletebufline(a:bufnr, 1, '$')
+        call setbufline(a:bufnr, 1, a:new_lines)
+        return
+    endif
+
+    call deletebufline(a:bufnr, a:l0, a:l1)
+    call appendbufline(a:bufnr, a:l0 - 1, a:new_lines)
+endfunction
+
+function! llama#nep_cancel() abort
+    call llama#nep_hide()
+endfunction
+
+function! llama#nep_hide() abort
+    let s:nep_shown = v:false
+
+    if !empty(s:nep_data)
+        let l:bufnr = s:nep_data.bufnr
+        if s:ghost_text_nvim
+            let l:ns = nvim_create_namespace('vt_nep')
+            if s:nep_data.extmark_src != -1
+                call nvim_buf_del_extmark(l:bufnr, l:ns, s:nep_data.extmark_src)
+            endif
+            if s:nep_data.extmark_virt != -1
+                call nvim_buf_del_extmark(l:bufnr, l:ns, s:nep_data.extmark_virt)
+            endif
+        elseif s:ghost_text_vim
+            call prop_remove({'type': 'llama_hl_nep_src', 'bufnr': l:bufnr})
+            call prop_remove({'type': 'llama_hl_nep_info', 'bufnr': l:bufnr})
+        endif
+
+        let s:nep_data = {}
+    endif
+
+    if g:llama_config.keymap_nep_accept != ''
+        exe 'silent! nunmap <buffer> ' . g:llama_config.keymap_nep_accept
+        exe 'silent! iunmap <buffer> ' . g:llama_config.keymap_nep_accept
+    endif
+    if g:llama_config.keymap_nep_cancel != ''
+        exe 'silent! nunmap <buffer> ' . g:llama_config.keymap_nep_cancel
+        exe 'silent! iunmap <buffer> ' . g:llama_config.keymap_nep_cancel
+    endif
+endfunction
+
+function! llama#is_nep_shown() abort
+    return s:nep_shown
+endfunction
+
+function! llama#nep_diffs() abort
+    return copy(s:recent_diffs)
+endfunction
+
+function! llama#nep_show_diffs() abort
+    if empty(s:recent_diffs)
+        echo 'llama.vim: No recent diffs recorded.'
+        return
+    endif
+
+    echo 'llama.vim: Recent recorded diffs (' . len(s:recent_diffs) . '):'
+    for i in range(len(s:recent_diffs))
+        let l:d = s:recent_diffs[i]
+        echo printf('[%d] %s', i + 1, l:d.file_path)
+        echo '  original: ' . substitute(l:d.original, '\n', ' | ', 'g')
+        echo '  updated:  ' . substitute(l:d.updated, '\n', ' | ', 'g')
+    endfor
+endfunction
+
+" =====================================
 " Debug helpers
 " =====================================
 
@@ -2227,6 +2941,19 @@ function! llama#profile_changed() abort
             call job_stop(s:current_job_fim)
         endif
         let s:current_job_fim = v:null
+    endif
+
+    if exists('s:current_job_nep') && s:current_job_nep != v:null
+        if s:ghost_text_nvim
+            call jobstop(s:current_job_nep)
+        elseif s:ghost_text_vim
+            call job_stop(s:current_job_nep)
+        endif
+        let s:current_job_nep = v:null
+    endif
+
+    if exists('s:nep_shown') && s:nep_shown
+        call llama#nep_hide()
     endif
 
     if exists('s:inst_reqs')
