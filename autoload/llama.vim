@@ -2485,14 +2485,14 @@ function! s:nep_dispatch(l0, l1, pos_x, pos_y, is_auto) abort
     let l:filepath = expand('%')
     let l:bufnr = bufnr('%')
 
-    " Debounce if job is already in progress
+    " Stop previous job if running
     if s:current_job_nep != v:null
-        if s:timer_nep != -1
-            call timer_stop(s:timer_nep)
-            let s:timer_nep = -1
+        if s:ghost_text_nvim
+            call jobstop(s:current_job_nep)
+        elseif s:ghost_text_vim
+            call job_stop(s:current_job_nep)
         endif
-        let s:timer_nep = timer_start(g:llama_config.nep_debounce_ms, {-> s:nep_dispatch(a:l0, a:l1, a:pos_x, a:pos_y, a:is_auto)})
-        return
+        let s:current_job_nep = v:null
     endif
 
     let l:fmt = g:llama_config.nep_format
@@ -2519,6 +2519,7 @@ function! s:nep_dispatch(l0, l1, pos_x, pos_y, is_auto) abort
         \ "curl",
         \ "--silent",
         \ "--no-buffer",
+        \ "--max-time", "30",
         \ "--request", "POST",
         \ "--url", g:llama_config.endpoint_nep,
         \ "--header", "Content-Type: application/json",
@@ -2683,6 +2684,15 @@ function! s:nep_on_response(filepath, l0, l1, pos_x, pos_y, bufnr, job_id, data,
         call llama#debug_log('nep_on_response json decode error', l:raw)
         return
     endtry
+
+    if type(l:decoded) == v:t_dict && has_key(l:decoded, 'error')
+        let l:err_msg = type(l:decoded.error) == v:t_dict ? get(l:decoded.error, 'message', string(l:decoded.error)) : string(l:decoded.error)
+        call llama#debug_log('nep_on_response server error', l:err_msg)
+        echohl WarningMsg
+        echom 'llama.vim NEP: ' . l:err_msg
+        echohl None
+        return
+    endif
 
     let l:content = ''
     if type(l:decoded) == v:t_dict
